@@ -48,7 +48,11 @@ BuildRequires:  gmp-devel
 BuildRequires:  mpfr-devel
 BuildRequires:  libmpc-devel
 BuildRequires:  isl-devel
+%if 0%{?rhel} == 9
+BuildRequires:  zlib-devel
+%else
 BuildRequires:  zlib-ng-compat-devel
+%endif
 
 %global debug_package %{nil}
 %global _debugsource_packages 0
