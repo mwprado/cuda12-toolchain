@@ -4,7 +4,7 @@
 %global mpfr_version       4.1.0
 %global mpc_version        1.2.1
 %global isl_version        0.24
-%global toolchain_release  7
+%global toolchain_release  8
 
 %global custom_gcc_root    /usr/lib64/custom-gcc14
 %global custom_glibc_root  /usr/lib64/custom-glibc
@@ -67,8 +67,15 @@ Version:        %{gcc_version}
 Release:        %{toolchain_release}%{?dist}
 Summary:        GCC 14.4 toolchain built against private glibc 2.40
 License:        GPL-3.0-or-later WITH GCC-exception-3.1
-AutoProv:       no
+# O pacote contem libgcc/libstdc++ para a glibc 2.40 privada.
+# AutoReq geraria requisitos GLIBC_2.38+ contra a glibc nativa do EPEL 9.
+# Exigir explicitamente a glibc privada e as ferramentas necessarias no host.
+AutoReqProv:    no
 Requires:       custom-glibc = %{glibc_version}-%{toolchain_release}%{?dist}
+Requires:       binutils
+Requires:       glibc
+Requires:       libstdc++
+Requires:       zlib
 
 %description -n custom-gcc14
 Private GCC 14.4 toolchain intended for CUDA 12.x.
@@ -965,6 +972,12 @@ echo "=== FINAL TOOLCHAIN CHECK OK ==="
 %{custom_glibc_root}
 
 %changelog
+* Sat Oct 17 2026 OllamaGrid Maintainers <builder@localhost> - 1.0-8
+- Desabilitar AutoReqProv no GCC privado para nao exigir GLIBC_2.38 do host EPEL 9.
+- Declarar explicitamente custom-glibc, binutils, glibc, libstdc++ e zlib.
+- Manter gcc, g++ e bibliotecas target em /usr/lib64/custom-gcc14.
+- Preservar o bootstrap EPEL/Fedora da release anterior.
+
 * Sat Oct 17 2026 OllamaGrid Maintainers <builder@localhost> - 1.0-7
 - Restore Fedora stage3.5 and stage4 self-hosted GCC14/glibc2.40 bootstrap.
 - Keep native host GCC for EPEL stage3.5 and stage4 compatibility.
