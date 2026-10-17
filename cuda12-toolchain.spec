@@ -4,7 +4,7 @@
 %global mpfr_version       4.1.0
 %global mpc_version        1.2.1
 %global isl_version        0.24
-%global toolchain_release  6
+%global toolchain_release  7
 
 %global custom_gcc_root    /usr/lib64/custom-gcc14
 %global custom_glibc_root  /usr/lib64/custom-glibc
@@ -135,8 +135,9 @@ STAGE4_ROOT="${TOP}/stage4-root"
 FINAL_GCC_ROOT="%{custom_gcc_root}"
 FINAL_GLIBC_ROOT="%{custom_glibc_root}"
 
-# Host compiler: executa com a glibc nativa (EPEL 9: 2.34).
-# O GCC final usa a glibc privada 2.40 somente como target sysroot.
+# O EPEL requer ferramentas host vinculadas a glibc nativa.
+# No Fedora, o GCC stage2 e a glibc 2.40 preservam o bootstrap anterior.
+# Em ambos os casos o sysroot instalado para o target permanece glibc 2.40.
 BUILD_CC=/usr/bin/gcc
 BUILD_CXX=/usr/bin/g++
 
@@ -173,10 +174,20 @@ run_or_die()
         return 0
     else
         RC=$?
-        if [ "$DESC" = "stage4 GCC configure" ] && [ -f "$GCC_BUILD4/config.log" ]; then
-            echo "=== stage4 config.log (last 200 lines) ===" >&2
-            tail -n 200 "$GCC_BUILD4/config.log" >&2
-        fi
+        case "$DESC" in
+            "stage3.5 GMP configure")
+                if [ -f "$GMP_BUILD35/config.log" ]; then
+                    echo "=== GMP stage3.5 config.log (last 200 lines) ===" >&2
+                    tail -n 200 "$GMP_BUILD35/config.log" >&2
+                fi
+                ;;
+            "stage4 GCC configure")
+                if [ -f "$GCC_BUILD4/config.log" ]; then
+                    echo "=== stage4 config.log (last 200 lines) ===" >&2
+                    tail -n 200 "$GCC_BUILD4/config.log" >&2
+                fi
+                ;;
+        esac
         echo "" >&2
         echo "============================================================" >&2
         echo "ERROR: ${DESC} failed with exit code ${RC}" >&2
@@ -542,12 +553,11 @@ check_complete_gcc "stage2-vs-stage3" "$STAGE2_GCC" "$STAGE3_GLIBC"
 echo "=== stage3 CHECK OK ==="
 
 # ============================================================
-# stage3.5: GCC host prerequisites against the native host glibc
+# stage3.5: GCC host prerequisites, compiler selected by distro
 #
-# The stage4 compiler is a host executable. Build its static GMP/MPFR/
-# MPC/ISL prerequisites with the distro compiler to avoid introducing
-# glibc 2.40 requirements into executables that must run on EPEL 9.
-# Target libgcc/libstdc++ still use the private stage3 glibc 2.40.
+# Fedora: stage2 GCC with stage3 glibc 2.40 (original bootstrap).
+# EPEL: native host compiler, because its libc is older than 2.40.
+# Both paths install target libgcc/libstdc++ against stage3 glibc.
 # ============================================================
 
 echo "=== stage3.5: private GCC host prerequisites ==="
@@ -566,8 +576,15 @@ mkdir -p \
     "$MPC_BUILD35" \
     "$ISL_BUILD35"
 
+%if 0%{?fedora}
+DEPS_CC="$STAGE2_GCC/bin/gcc --sysroot=$STAGE3_GLIBC -B$STAGE3_GLIBC/usr/lib64/"
+DEPS_CXX="$STAGE2_GCC/bin/g++ --sysroot=$STAGE3_GLIBC -B$STAGE3_GLIBC/usr/lib64/"
+echo "    Fedora stage3.5 compiler: $DEPS_CC"
+%else
 DEPS_CC="$BUILD_CC"
 DEPS_CXX="$BUILD_CXX"
+echo "    EPEL stage3.5 compiler: $DEPS_CC"
+%endif
 
 echo ">>> stage3.5 GMP %{gmp_version}"
 
@@ -718,6 +735,22 @@ int main(void)
 }
 EOF
 
+%if 0%{?fedora}
+STAGE35_TEST_CC="$STAGE2_GCC/bin/gcc"
+STAGE35_TEST_SYSROOT="$STAGE3_GLIBC"
+run_or_die "stage3.5 prerequisite compile/link smoke test" \
+    "$STAGE35_TEST_CC" \
+    --sysroot="$STAGE35_TEST_SYSROOT" \
+    -B"$STAGE35_TEST_SYSROOT/usr/lib64/" \
+    -I"$STAGE35_DEPS/include" \
+    "$TOP/check-stage35.c" \
+    "$STAGE35_DEPS/lib/libisl.a" \
+    "$STAGE35_DEPS/lib/libmpc.a" \
+    "$STAGE35_DEPS/lib/libmpfr.a" \
+    "$STAGE35_DEPS/lib/libgmp.a" \
+    -lm \
+    -o "$TOP/check-stage35"
+%else
 run_or_die "stage3.5 prerequisite compile/link smoke test" \
     "$BUILD_CC" \
     -I"$STAGE35_DEPS/include" \
@@ -728,6 +761,7 @@ run_or_die "stage3.5 prerequisite compile/link smoke test" \
     "$STAGE35_DEPS/lib/libgmp.a" \
     -lm \
     -o "$TOP/check-stage35"
+%endif
 
 require_exec "$TOP/check-stage35"
 run_or_die "stage3.5 prerequisite execution smoke test" "$TOP/check-stage35"
@@ -745,14 +779,24 @@ mkdir -p "$GCC_BUILD4" "$STAGE4_ROOT"
 
 pushd "$GCC_BUILD4"
 
-# GCC host programs run on the native chroot libc; stage2 and its target
-# libstdc++ must not be injected via LD_LIBRARY_PATH.
+# Fedora: reuse stage2 GCC and the original stage3 glibc sysroot.
+# EPEL: stage4 host executables must run with the distro's older libc.
+%if 0%{?fedora}
+STAGE4_CC="$STAGE2_GCC/bin/gcc --sysroot=$STAGE3_GLIBC -B$STAGE3_GLIBC/usr/lib64/"
+STAGE4_CXX="$STAGE2_GCC/bin/g++ --sysroot=$STAGE3_GLIBC -B$STAGE3_GLIBC/usr/lib64/"
+export LD_LIBRARY_PATH="$STAGE2_GCC/lib64:$STAGE2_GCC/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+echo "    Fedora stage4 compiler: $STAGE4_CC"
+%else
+STAGE4_CC="$BUILD_CC"
+STAGE4_CXX="$BUILD_CXX"
 unset LD_LIBRARY_PATH
+echo "    EPEL stage4 compiler: $STAGE4_CC"
+%endif
 
 run_or_die "stage4 GCC configure" \
     env \
-    CC="$BUILD_CC" \
-    CXX="$BUILD_CXX" \
+    CC="$STAGE4_CC" \
+    CXX="$STAGE4_CXX" \
     CPPFLAGS="-I$STAGE35_DEPS/include" \
     CFLAGS="-O2 -g" \
     CXXFLAGS="-O2 -g" \
@@ -921,6 +965,12 @@ echo "=== FINAL TOOLCHAIN CHECK OK ==="
 %{custom_glibc_root}
 
 %changelog
+* Sat Oct 17 2026 OllamaGrid Maintainers <builder@localhost> - 1.0-7
+- Restore Fedora stage3.5 and stage4 self-hosted GCC14/glibc2.40 bootstrap.
+- Keep native host GCC for EPEL stage3.5 and stage4 compatibility.
+- Print stage3.5 GMP config.log when configure fails, in addition to stage4.
+- Avoid applying EPEL-specific host toolchain changes to Fedora builders.
+
 * Sat Oct 17 2026 OllamaGrid Maintainers <builder@localhost> - 1.0-6
 - Build GCC stage4 host executables and static prerequisites against the native host glibc
 - Keep private glibc 2.40 as the sysroot for target libraries
