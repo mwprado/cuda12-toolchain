@@ -4,7 +4,7 @@
 %global mpfr_version       4.1.0
 %global mpc_version        1.2.1
 %global isl_version        0.24
-%global toolchain_release  5
+%global toolchain_release  6
 
 %global custom_gcc_root    /usr/lib64/custom-gcc14
 %global custom_glibc_root  /usr/lib64/custom-glibc
@@ -135,11 +135,19 @@ STAGE4_ROOT="${TOP}/stage4-root"
 FINAL_GCC_ROOT="%{custom_gcc_root}"
 FINAL_GLIBC_ROOT="%{custom_glibc_root}"
 
+# Host compiler: executa com a glibc nativa (EPEL 9: 2.34).
+# O GCC final usa a glibc privada 2.40 somente como target sysroot.
+BUILD_CC=/usr/bin/gcc
+BUILD_CXX=/usr/bin/g++
+
 JOBS="$(nproc)"
 
 export CFLAGS="-O2 -g"
 export CXXFLAGS="-O2 -g"
 export LDFLAGS=""
+
+# Evita injetar runtimes de stages anteriores em ferramentas do host.
+unset LD_LIBRARY_PATH
 
 unset FFLAGS || :
 unset FCFLAGS || :
@@ -165,6 +173,10 @@ run_or_die()
         return 0
     else
         RC=$?
+        if [ "$DESC" = "stage4 GCC configure" ] && [ -f "$GCC_BUILD4/config.log" ]; then
+            echo "=== stage4 config.log (last 200 lines) ===" >&2
+            tail -n 200 "$GCC_BUILD4/config.log" >&2
+        fi
         echo "" >&2
         echo "============================================================" >&2
         echo "ERROR: ${DESC} failed with exit code ${RC}" >&2
@@ -530,11 +542,12 @@ check_complete_gcc "stage2-vs-stage3" "$STAGE2_GCC" "$STAGE3_GLIBC"
 echo "=== stage3 CHECK OK ==="
 
 # ============================================================
-# stage3.5: GCC host prerequisites against final glibc 2.40
+# stage3.5: GCC host prerequisites against the native host glibc
 #
-# These libraries are temporary bootstrap inputs.  They are built
-# static-only so the final GCC does not acquire runtime dependencies
-# on Fedora's GMP/MPFR/MPC/ISL shared libraries.
+# The stage4 compiler is a host executable. Build its static GMP/MPFR/
+# MPC/ISL prerequisites with the distro compiler to avoid introducing
+# glibc 2.40 requirements into executables that must run on EPEL 9.
+# Target libgcc/libstdc++ still use the private stage3 glibc 2.40.
 # ============================================================
 
 echo "=== stage3.5: private GCC host prerequisites ==="
@@ -553,8 +566,8 @@ mkdir -p \
     "$MPC_BUILD35" \
     "$ISL_BUILD35"
 
-DEPS_CC="$STAGE2_GCC/bin/gcc --sysroot=$STAGE3_GLIBC -B$STAGE3_GLIBC/usr/lib64/"
-DEPS_CXX="$STAGE2_GCC/bin/g++ --sysroot=$STAGE3_GLIBC -B$STAGE3_GLIBC/usr/lib64/"
+DEPS_CC="$BUILD_CC"
+DEPS_CXX="$BUILD_CXX"
 
 echo ">>> stage3.5 GMP %{gmp_version}"
 
@@ -706,9 +719,7 @@ int main(void)
 EOF
 
 run_or_die "stage3.5 prerequisite compile/link smoke test" \
-    "$STAGE2_GCC/bin/gcc" \
-    --sysroot="$STAGE3_GLIBC" \
-    -B"$STAGE3_GLIBC/usr/lib64/" \
+    "$BUILD_CC" \
     -I"$STAGE35_DEPS/include" \
     "$TOP/check-stage35.c" \
     "$STAGE35_DEPS/lib/libisl.a" \
@@ -719,6 +730,7 @@ run_or_die "stage3.5 prerequisite compile/link smoke test" \
     -o "$TOP/check-stage35"
 
 require_exec "$TOP/check-stage35"
+run_or_die "stage3.5 prerequisite execution smoke test" "$TOP/check-stage35"
 
 echo "=== stage3.5 CHECK OK ==="
 
@@ -733,15 +745,14 @@ mkdir -p "$GCC_BUILD4" "$STAGE4_ROOT"
 
 pushd "$GCC_BUILD4"
 
-# Keep the stage2 C++ runtime available while configure executes its
-# temporary host test programs.  Do not add the private glibc itself to
-# LD_LIBRARY_PATH; compile-time selection is controlled by --sysroot.
-export LD_LIBRARY_PATH="$STAGE2_GCC/lib64:$STAGE2_GCC/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# GCC host programs run on the native chroot libc; stage2 and its target
+# libstdc++ must not be injected via LD_LIBRARY_PATH.
+unset LD_LIBRARY_PATH
 
 run_or_die "stage4 GCC configure" \
     env \
-    CC="$STAGE2_GCC/bin/gcc --sysroot=$STAGE3_GLIBC -B$STAGE3_GLIBC/usr/lib64/" \
-    CXX="$STAGE2_GCC/bin/g++ --sysroot=$STAGE3_GLIBC -B$STAGE3_GLIBC/usr/lib64/" \
+    CC="$BUILD_CC" \
+    CXX="$BUILD_CXX" \
     CPPFLAGS="-I$STAGE35_DEPS/include" \
     CFLAGS="-O2 -g" \
     CXXFLAGS="-O2 -g" \
@@ -910,6 +921,12 @@ echo "=== FINAL TOOLCHAIN CHECK OK ==="
 %{custom_glibc_root}
 
 %changelog
+* Sat Oct 17 2026 OllamaGrid Maintainers <builder@localhost> - 1.0-6
+- Build GCC stage4 host executables and static prerequisites against the native host glibc
+- Keep private glibc 2.40 as the sysroot for target libraries
+- Remove LD_LIBRARY_PATH contamination from stage2 C++ runtime
+- Run stage3.5 prerequisite test and print stage4 config.log on configure failure
+
 * Wed Sep 16 2026 Moacyr Prado <builder@localhost> - 1.0-5
 - Add GCC 14.4 canonical GMP, MPFR, MPC and ISL prerequisite sources
 - Build private static prerequisite libraries as stage3.5 against glibc 2.40
